@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict  # , Tuple
+from typing import Any, Dict, Callable # , Tuple
 
 # import numpy.typing as npt
 import torch as th
@@ -19,19 +19,47 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
     User created Reinforcement Learning Model prediction model.
     """
 
+    def linear_schedule(self, initial_value: float) -> Callable[[float], float]:
+        """
+        Linear learning rate schedule.
+
+        :param initial_value: Initial learning rate.
+        :return: schedule that computes
+        current learning rate depending on remaining progress
+        """
+        def func(progress_remaining: float) -> float:
+            """
+            Progress will decrease from 1 (beginning) to 0.
+
+            :param progress_remaining:
+            :return: current learning rate
+            """
+            return progress_remaining * initial_value
+
+        return func
+
     def fit_rl(self, data_dictionary: Dict[str, Any], dk: FreqaiDataKitchen):
 
         train_df = data_dictionary["train_features"]
         total_timesteps = self.freqai_info["rl_config"]["train_cycles"] * len(train_df)
 
         # model arch
-        policy_kwargs = dict(activation_fn=th.nn.ReLU,
+        policy_kwargs = dict(activation_fn=th.nn.Tanh,
                              net_arch=[512, 512, 256])
 
-        model = self.MODELCLASS(self.policy_type, self.train_env, policy_kwargs=policy_kwargs,
-                                tensorboard_log=Path(dk.full_path / "tensorboard"),
-                                **self.freqai_info['model_training_parameters']
-                                )
+        if dk.pair not in self.dd.model_dictionary or not self.continual_learning:
+            model = self.MODELCLASS(self.policy_type, self.train_env, policy_kwargs=policy_kwargs,
+                                    tensorboard_log=Path(dk.full_path / "tensorboard"),
+                                    learning_rate=self.linear_schedule(0.01),
+                                    clip_range=self.linear_schedule(0.5),
+                                    **self.freqai_info['model_training_parameters']
+                                    )
+        else:
+            logger.info('Continual training activated - starting training from previously '
+                        'trained agent.')
+            model = self.dd.model_dictionary[dk.pair]
+            model.tensorboard_log = Path(dk.data_path / "tensorboard")
+            model.set_env(self.train_env)
 
         model.learn(
             total_timesteps=int(total_timesteps),
@@ -55,32 +83,19 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
         """
         train_df = data_dictionary["train_features"]
         test_df = data_dictionary["test_features"]
-        eval_freq = self.freqai_info["rl_config"]["eval_cycles"] * len(test_df)
 
-        # environments
-        if not self.train_env:
-            env_id = "train_env"
-            num_cpu = int(self.freqai_info["rl_config"]["thread_count"] / 2)
-            self.train_env = SubprocVecEnv([make_env(env_id, i, 1, train_df, prices_train,
-                                            self.reward_params, self.CONV_WIDTH,
-                                            config=self.config) for i
-                                            in range(num_cpu)])
+        env_id = "train_env"
+        num_cpu = int(self.freqai_info["rl_config"]["thread_count"] / 2)
+        self.train_env = SubprocVecEnv([make_env(env_id, i, 1, train_df, prices_train,
+                                        self.reward_params, self.CONV_WIDTH,
+                                        config=self.config) for i
+                                        in range(num_cpu)])
 
-            eval_env_id = 'eval_env'
-            self.eval_env = SubprocVecEnv([make_env(eval_env_id, i, 1, test_df, prices_test,
-                                           self.reward_params, self.CONV_WIDTH, monitor=True,
-                                           config=self.config) for i
-                                           in range(num_cpu)])
-            self.eval_callback = EvalCallback(self.eval_env, deterministic=True,
-                                              render=False, eval_freq=eval_freq,
-                                              best_model_save_path=dk.data_path)
-        else:
-            self.train_env.env_method('reset')
-            self.eval_env.env_method('reset')
-            self.train_env.env_method('reset_env', train_df, prices_train,
-                                      self.CONV_WIDTH, self.reward_params)
-            self.eval_env.env_method('reset_env', train_df, prices_train,
-                                     self.CONV_WIDTH, self.reward_params)
-            self.eval_callback.__init__(self.eval_env, deterministic=True,
-                                        render=False, eval_freq=eval_freq,
-                                        best_model_save_path=dk.data_path)
+        eval_env_id = 'eval_env'
+        self.eval_env = SubprocVecEnv([make_env(eval_env_id, i, 1, test_df, prices_test,
+                                                self.reward_params, self.CONV_WIDTH, monitor=True,
+                                                config=self.config) for i
+                                       in range(num_cpu)])
+        self.eval_callback = EvalCallback(self.eval_env, deterministic=True,
+                                          render=False, eval_freq=len(train_df),
+                                          best_model_save_path=dk.data_path)

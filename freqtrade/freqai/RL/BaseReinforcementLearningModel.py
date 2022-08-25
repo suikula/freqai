@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-SB3_MODELS = ['PPO', 'A2C', 'DQN', 'TD3', 'SAC']
-SB3_CONTRIB_MODELS = ['TRPO', 'ARS']
+SB3_MODELS = ['PPO', 'A2C', 'DQN']
+SB3_CONTRIB_MODELS = ['TRPO', 'ARS', 'RecurrentPPO', 'MaskablePPO']
 
 
 class BaseReinforcementLearningModel(IFreqaiModel):
@@ -43,7 +43,7 @@ class BaseReinforcementLearningModel(IFreqaiModel):
         self.eval_callback: EvalCallback = None
         self.model_type = self.freqai_info['rl_config']['model_type']
         self.rl_config = self.freqai_info['rl_config']
-        self.continual_retraining = self.rl_config.get('continual_retraining', False)
+        self.continual_learning = self.rl_config.get('continual_learning', False)
         if self.model_type in SB3_MODELS:
             import_str = 'stable_baselines3'
         elif self.model_type in SB3_CONTRIB_MODELS:
@@ -111,7 +111,6 @@ class BaseReinforcementLearningModel(IFreqaiModel):
         """
         train_df = data_dictionary["train_features"]
         test_df = data_dictionary["test_features"]
-        eval_freq = self.freqai_info["rl_config"]["eval_cycles"] * len(test_df)
 
         self.train_env = MyRLEnv(df=train_df, prices=prices_train, window_size=self.CONV_WIDTH,
                                  reward_kwargs=self.reward_params, config=self.config)
@@ -119,7 +118,7 @@ class BaseReinforcementLearningModel(IFreqaiModel):
                                 window_size=self.CONV_WIDTH,
                                 reward_kwargs=self.reward_params, config=self.config))
         self.eval_callback = EvalCallback(self.eval_env, deterministic=True,
-                                          render=False, eval_freq=eval_freq,
+                                          render=False, eval_freq=len(train_df),
                                           best_model_save_path=str(dk.data_path))
 
     @abstractmethod
@@ -258,7 +257,7 @@ def make_env(env_id: str, rank: int, seed: int, train_df: DataFrame, price: Data
         env = MyRLEnv(df=train_df, prices=price, window_size=window_size,
                       reward_kwargs=reward_params, id=env_id, seed=seed + rank, config=config)
         if monitor:
-            env = Monitor(env, ".")
+            env = Monitor(env)
         return env
     set_random_seed(seed)
     return _init
@@ -274,22 +273,26 @@ class MyRLEnv(Base5ActionRLEnv):
 
         rw = 0
 
+        # # first, penalize if the action is not valid
+        # if not self._is_valid(action):
+        #     return -15
+
         max_trade_duration = self.rl_config.get('max_trade_duration_candles', 20)
         min_profit = self.rl_config.get('min_profit', 0.005)
         pnl = self.get_unrealized_profit()
 
         # reward for opening trades
         if action == Actions.Short_enter.value and self._position == Positions.Neutral:
-            rw = 1
+            return 10
         if action == Actions.Long_enter.value and self._position == Positions.Neutral:
-            rw = 1
+            return 10
 
         # close long
         if action == Actions.Long_exit.value and self._position == Positions.Long:
             if pnl >= 0 and pnl < min_profit:
                 self.long_winners += 1
                 self.long_small_profit += 1
-                rw = 0
+                return 0
             if pnl >= min_profit:
                 if pnl > self.profit_aim * self.rr:
                     rw = 50
@@ -301,6 +304,7 @@ class MyRLEnv(Base5ActionRLEnv):
                     self.long_winners += 1
                     self.long_pnl += pnl
                     self.long_profit += 1
+                    return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
                     for i in range(1, 9):
@@ -308,43 +312,45 @@ class MyRLEnv(Base5ActionRLEnv):
                             self.long_winners += 1
                             self.long_pnl += pnl
                             self.long_over_profit += 1
-                            rw = rw * (1 - (i / 10))
+                            return rw * (1 - (i / 10))
 
                         elif over >= 9:
                             self.long_winners += 1
                             self.long_pnl += pnl
                             self.long_over_over_profit += 1
-                            rw = rw * 0.1
+                            return rw * 0.1
 
             # punishment for losses
             if pnl < 0:
                 self.long_losers += 1
                 self.long_pnl += pnl
                 self.long_loss += 1
-                rw = -50
+                return -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.long_pnl += pnl
                 self.long_losers += 1
                 self.long_big_loss += 1
-                rw = -100
+                return -100
 
         # close short
         if action == Actions.Short_exit.value and self._position == Positions.Short:
             if pnl >= 0 and pnl < min_profit:
                 self.short_winners += 1
                 self.short_small_profit += 1
-                rw = 0
+                return 0
             if pnl >= min_profit:
                 # aim x2 rw
                 if pnl > self.profit_aim * self.rr:
                     rw = 50
                 if pnl > self.profit_aim * (self.rr * 2):
                     rw = 100
+
                 # duration rules
                 if self._current_tick - self._last_trade_tick <= max_trade_duration:
                     self.short_winners += 1
                     self.short_pnl += pnl
                     self.short_profit += 1
+                    return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
                     for i in range(1, 9):
@@ -352,22 +358,22 @@ class MyRLEnv(Base5ActionRLEnv):
                             self.short_winners += 1
                             self.short_pnl += pnl
                             self.short_over_profit += 1
-                            rw = rw * (1 - (i / 10))
+                            return rw * (1 - (i / 10))
                         elif over >= 9:
                             self.short_winners += 1
                             self.short_pnl += pnl
                             self.short_over_over_profit += 1
-                            rw = rw * 0.1
+                            return rw * 0.1
 
             # punishment for losses
             if pnl < 0:
                 self.short_losers += 1
                 self.short_pnl += pnl
                 self.short_loss += 1
-                rw = -50
+                return -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.short_losers += 1
                 self.short_pnl += pnl
                 self.short_big_loss += 1
-                rw = -100
-        return rw
+                return -100
+        return 0

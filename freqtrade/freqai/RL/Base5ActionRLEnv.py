@@ -77,7 +77,7 @@ class Base5ActionRLEnv(gym.Env):
         self._position = Positions.Neutral
         self._position_history: list = [None]
         self.total_reward: float = 0
-        self._total_profit: float = 0
+        self._total_profit: float = 1
         self._first_rendering: bool = False
         self.history: dict = {}
         self.trade_history: list = []
@@ -168,7 +168,6 @@ class Base5ActionRLEnv(gym.Env):
 
         self.total_reward = 0.
         self._total_profit = 1.  # unit
-        self._first_rendering = True
         self.history = {}
         self.trade_history = []
         self.portfolio_log_returns = np.zeros(len(self.prices))
@@ -252,7 +251,7 @@ class Base5ActionRLEnv(gym.Env):
                     {'price': self.current_price(), 'index': self._current_tick,
                      'type': trade_type})
 
-        if self._total_profit < 0.5:
+        if self._total_profit < 1 - self.rl_config.get('max_training_drawdown', 0.8):
             self._done = True
 
         self._position_history.append(self._position)
@@ -325,23 +324,23 @@ class Base5ActionRLEnv(gym.Env):
                     (action == Actions.Long_exit.value and self._position == Positions.Short) or
                     (action == Actions.Long_exit.value and self._position == Positions.Neutral))
 
-    # def _is_valid(self, action: int):
-    #     # trade signal
-    #     """
-    #     Determine if the signal is valid.
-    #     e.g.: agent wants a Actions.Long_exit while it is in a Positions.short
-    #     """
-    #     # Agent should only try to exit if it is in position
-    #     if action in (Actions.Short_exit.value, Actions.Long_exit.value):
-    #         if self._position not in (Positions.Short, Positions.Long):
-    #             return False
+    def _is_valid(self, action: int):
+        # trade signal
+        """
+        Determine if the signal is valid.
+        e.g.: agent wants a Actions.Long_exit while it is in a Positions.short
+        """
+        # Agent should only try to exit if it is in position
+        if action in (Actions.Short_exit.value, Actions.Long_exit.value):
+            if self._position not in (Positions.Short, Positions.Long):
+                return False
 
-    #     # Agent should only try to enter if it is not in position
-    #     if action in (Actions.Short_enter.value, Actions.Long_enter.value):
-    #         if self._position != Positions.Neutral:
-    #             return False
+        # Agent should only try to enter if it is not in position
+        if action in (Actions.Short_enter.value, Actions.Long_enter.value):
+            if self._position != Positions.Neutral:
+                return False
 
-    #     return True
+        return True
 
     def _is_trade(self, action: Actions):
         return ((action == Actions.Long_enter.value and self._position == Positions.Neutral) or
