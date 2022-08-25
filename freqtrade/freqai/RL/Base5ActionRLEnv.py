@@ -82,11 +82,78 @@ class Base5ActionRLEnv(gym.Env):
         self.history: dict = {}
         self.trade_history: list = []
 
+        # extra logger
+        self.long_winners: int = 0
+        self.long_losers: int = 0
+        self.short_winners: int = 0
+        self.short_losers: int = 0
+
+        self.long_pnl: float = 0
+        self.short_pnl: float = 0
+
+        self.long_small_profit: int = 0
+        self.long_profit: int = 0
+        self.long_over_profit: int = 0
+        self.long_over_over_profit: int = 0
+        self.long_loss: int = 0
+        self.long_big_loss: int = 0
+
+        self.short_small_profit: int = 0
+        self.short_profit: int = 0
+        self.short_over_profit: int = 0
+        self.short_over_over_profit: int = 0
+        self.short_loss: int = 0
+        self.short_big_loss: int = 0
+
     def seed(self, seed: int = 1):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
     def reset(self):
+
+        logger.info(f"Long trades: {self.long_winners + self.long_losers} - W: {self.long_winners} L: {self.long_losers} - pnl {round(self.long_pnl, 4)} %")
+        logger.info(f"Short trades: {self.short_winners + self.short_losers} - W: {self.short_winners} L: {self.short_losers} - pnl {round(self.short_pnl, 4)} %")
+        logger.info(f"Total profit: {self._total_profit}")
+
+        logger.info(f"long_small_profit: {self.long_small_profit}")
+        logger.info(f"long_profit: {self.long_profit}")
+        logger.info(f"long_over_profit: {self.long_over_profit}")
+        logger.info(f"long_over_over_profit: {self.long_over_over_profit}")
+        logger.info(f"long_loss: {self.long_loss}")
+        logger.info(f"long_big_loss: {self.long_big_loss}")
+
+        logger.info(f"short_small_profit: {self.short_small_profit}")
+        logger.info(f"short_profit: {self.short_profit}")
+        logger.info(f"short_over_profit: {self.short_over_profit}")
+        logger.info(f"short_over_over_profit: {self.short_over_over_profit}")
+        logger.info(f"short_loss: {self.short_loss}")
+        logger.info(f"short_big_loss: {self.short_big_loss}")
+
+
+        # extra logger
+        self.long_winners = 0
+        self.long_losers = 0
+        self.short_winners = 0
+        self.short_losers = 0
+
+        self.long_pnl = 0
+        self.short_pnl = 0
+
+        self.long_small_profit = 0
+        self.long_profit = 0
+        self.long_over_profit = 0
+        self.long_over_over_profit = 0
+        self.long_loss = 0
+        self.long_big_loss = 0
+
+        self.short_small_profit = 0
+        self.short_profit = 0
+        self.short_over_profit = 0
+        self.short_over_over_profit = 0
+        self.short_loss = 0
+        self.short_big_loss = 0
+
+
 
         self._done = False
 
@@ -112,6 +179,26 @@ class Base5ActionRLEnv(gym.Env):
         return self._get_observation()
 
     def step(self, action: int):
+        # "action masking"
+        if self._position == Positions.Neutral:
+            if action == Actions.Long_exit.value:
+                action = 0
+            if action == Actions.Short_exit.value:
+                action = 0
+        if self._position == Positions.Short:
+            if action == Actions.Long_exit.value:
+                action = 0
+            if action == Actions.Long_enter.value:
+                action = 0
+            if action == Actions.Short_enter.value:
+                action = 0
+        if self._position == Positions.Long:
+            if action == Actions.Short_exit.value:
+                action = 0
+            if action == Actions.Short_enter.value:
+                action = 0
+            if action == Actions.Long_enter.value:
+                action = 0
         self._done = False
         self._current_tick += 1
 
@@ -238,23 +325,23 @@ class Base5ActionRLEnv(gym.Env):
                     (action == Actions.Long_exit.value and self._position == Positions.Short) or
                     (action == Actions.Long_exit.value and self._position == Positions.Neutral))
 
-    def _is_valid(self, action: int):
-        # trade signal
-        """
-        Determine if the signal is valid.
-        e.g.: agent wants a Actions.Long_exit while it is in a Positions.short
-        """
-        # Agent should only try to exit if it is in position
-        if action in (Actions.Short_exit.value, Actions.Long_exit.value):
-            if self._position not in (Positions.Short, Positions.Long):
-                return False
+    # def _is_valid(self, action: int):
+    #     # trade signal
+    #     """
+    #     Determine if the signal is valid.
+    #     e.g.: agent wants a Actions.Long_exit while it is in a Positions.short
+    #     """
+    #     # Agent should only try to exit if it is in position
+    #     if action in (Actions.Short_exit.value, Actions.Long_exit.value):
+    #         if self._position not in (Positions.Short, Positions.Long):
+    #             return False
 
-        # Agent should only try to enter if it is not in position
-        if action in (Actions.Short_enter.value, Actions.Long_enter.value):
-            if self._position != Positions.Neutral:
-                return False
+    #     # Agent should only try to enter if it is not in position
+    #     if action in (Actions.Short_enter.value, Actions.Long_enter.value):
+    #         if self._position != Positions.Neutral:
+    #             return False
 
-        return True
+    #     return True
 
     def _is_trade(self, action: Actions):
         return ((action == Actions.Long_enter.value and self._position == Positions.Neutral) or
