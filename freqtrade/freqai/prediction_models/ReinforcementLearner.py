@@ -1,16 +1,16 @@
 import logging
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Callable, Dict
 
 import torch as th
-from freqtrade.freqai.data_kitchen import FreqaiDataKitchen
-from freqtrade.freqai.RL.Base5ActionRLEnv import Actions, Base5ActionRLEnv, Positions
-from freqtrade.freqai.RL.BaseReinforcementLearningModel import BaseReinforcementLearningModel
-from pathlib import Path
 from pandas import DataFrame
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
-import numpy as np
-from typing import Callable
+
+from freqtrade.freqai.data_kitchen import FreqaiDataKitchen
+from freqtrade.freqai.RL.Base5ActionRLEnv import Actions, Base5ActionRLEnv, Positions
+from freqtrade.freqai.RL.BaseReinforcementLearningModel import BaseReinforcementLearningModel
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,117 +102,102 @@ class MyRLEnv(Base5ActionRLEnv):
 
     def calculate_reward(self, action):
 
-        #if self._last_trade_tick is None:
-        #    return 0.
-
-        # # first, penalize if the action is not valid
-        # if not self._is_valid(action):
-        #     return -1
         rw = 0
 
         max_trade_duration = self.rl_config.get('max_trade_duration_candles', 20)
+        min_profit = self.rl_config.get('min_profit', 0.005)
         pnl = self.get_unrealized_profit()
 
         # reward for opening trades
         if action == Actions.Short_enter.value and self._position == Positions.Neutral:
-            return 1
+            rw = 1
         if action == Actions.Long_enter.value and self._position == Positions.Neutral:
-            return 1
-
+            rw = 1
 
         # close long
         if action == Actions.Long_exit.value and self._position == Positions.Long:
-            if pnl >= 0 and pnl < 0.005:
+            if pnl >= 0 and pnl < min_profit:
                 self.long_winners += 1
                 self.long_small_profit += 1
-                return 0
-            if pnl >= 0.005: # this should be set in config
-                # aim x2 rw
+                rw = 0
+            if pnl >= min_profit:
                 if pnl > self.profit_aim * self.rr:
                     rw = 50
                 if pnl > self.profit_aim * (self.rr * 2):
                     rw = 100
-                if pnl < self.profit_aim * self.rr:
-                    rw = 2
-                
+
                 # duration rules
                 if self._current_tick - self._last_trade_tick <= max_trade_duration:
                     self.long_winners += 1
                     self.long_pnl += pnl
                     self.long_profit += 1
-                    return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
-                    for i in range(1,9):
+                    for i in range(1, 9):
                         if over == i:
                             self.long_winners += 1
                             self.long_pnl += pnl
                             self.long_over_profit += 1
-                            return rw*(1-(i/10))
-                            
+                            rw = rw * (1 - (i / 10))
+
                         elif over >= 9:
                             self.long_winners += 1
                             self.long_pnl += pnl
                             self.long_over_over_profit += 1
-                            return rw * 0.1
+                            rw = rw * 0.1
 
-            #punishment for losses
+            # punishment for losses
             if pnl < 0:
                 self.long_losers += 1
-                self.long_pnl += pnl 
+                self.long_pnl += pnl
                 self.long_loss += 1
-                return -50
+                rw = -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.long_pnl += pnl
                 self.long_losers += 1
                 self.long_big_loss += 1
-                return -100
-
+                rw = -100
 
         # close short
         if action == Actions.Short_exit.value and self._position == Positions.Short:
-            if pnl >= 0 and pnl < 0.005:
+            if pnl >= 0 and pnl < min_profit:
                 self.short_winners += 1
                 self.short_small_profit += 1
-                return 0
-            if pnl >= 0.005:
+                rw = 0
+            if pnl >= min_profit:
                 # aim x2 rw
                 if pnl > self.profit_aim * self.rr:
                     rw = 50
                 if pnl > self.profit_aim * (self.rr * 2):
                     rw = 100
-                if pnl < self.profit_aim * self.rr:
-                    rw = 2
-
                 # duration rules
                 if self._current_tick - self._last_trade_tick <= max_trade_duration:
                     self.short_winners += 1
                     self.short_pnl += pnl
                     self.short_profit += 1
-                    return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
-                    for i in range(1,9):
+                    for i in range(1, 9):
                         if over == i:
                             self.short_winners += 1
                             self.short_pnl += pnl
                             self.short_over_profit += 1
-                            return rw*(1-(i/10))
+                            rw = rw * (1 - (i / 10))
                         elif over >= 9:
                             self.short_winners += 1
                             self.short_pnl += pnl
                             self.short_over_over_profit += 1
-                            return rw * 0.1
-            
-            #punishment for losses
+                            rw = rw * 0.1
+
+            # punishment for losses
             if pnl < 0:
                 self.short_losers += 1
                 self.short_pnl += pnl
                 self.short_loss += 1
-                return -50
+                rw = -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.short_losers += 1
                 self.short_pnl += pnl
                 self.short_big_loss += 1
-                return -100
-        return 0
+                rw = -100
+        return rw
