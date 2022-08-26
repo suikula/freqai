@@ -3,6 +3,7 @@ from typing import Any, Dict, Callable # , Tuple
 
 # import numpy.typing as npt
 import torch as th
+from math import log
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from freqtrade.freqai.RL.BaseReinforcementLearningModel import (BaseReinforcementLearningModel,
@@ -19,11 +20,13 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
     User created Reinforcement Learning Model prediction model.
     """
 
-    def linear_schedule(self, initial_value: float) -> Callable[[float], float]:
+    def lr_schedule(self, initial_value: float, rate: float):
         """
-        Linear learning rate schedule.
+        Learning rate schedule:
+            Exponential decay by factors of 10
 
         :param initial_value: Initial learning rate.
+        :param rate: Exponential rate of decay. High values mean fast early drop in LR
         :return: schedule that computes
         current learning rate depending on remaining progress
         """
@@ -34,7 +37,10 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
             :param progress_remaining:
             :return: current learning rate
             """
-            return progress_remaining * initial_value
+            if progress_remaining <= 0:
+                return 1e-9
+            
+            return initial_value * 10 ** (rate * log(progress_remaining))
 
         return func
 
@@ -45,13 +51,13 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
 
         # model arch
         policy_kwargs = dict(activation_fn=th.nn.Tanh,
-                             net_arch=[512, 512, 256])
+                             net_arch=[512, 512, 256, 64, 32])
 
         if dk.pair not in self.dd.model_dictionary or not self.continual_learning:
             model = self.MODELCLASS(self.policy_type, self.train_env, policy_kwargs=policy_kwargs,
                                     tensorboard_log=Path(dk.full_path / "tensorboard"),
-                                    learning_rate=self.linear_schedule(0.01),
-                                    clip_range=self.linear_schedule(0.5),
+                                    learning_rate=self.lr_schedule(0.01, 3),
+                                    clip_range=self.lr_schedule(0.5, 3),
                                     **self.freqai_info['model_training_parameters']
                                     )
         else:
@@ -87,7 +93,7 @@ class ReinforcementLearner_multiproc(BaseReinforcementLearningModel):
         env_id = "train_env"
         num_cpu = int(self.freqai_info["rl_config"]["thread_count"] / 2)
         self.train_env = SubprocVecEnv([make_env(env_id, i, 1, train_df, prices_train,
-                                        self.reward_params, self.CONV_WIDTH,
+                                        self.reward_params, self.CONV_WIDTH, monitor=True, 
                                         config=self.config) for i
                                         in range(num_cpu)])
 

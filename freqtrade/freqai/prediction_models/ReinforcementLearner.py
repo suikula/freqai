@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 import torch as th
+from math import log
 from pandas import DataFrame
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
@@ -19,11 +20,13 @@ class ReinforcementLearner(BaseReinforcementLearningModel):
     """
     User created Reinforcement Learning Model prediction model.
     """
-    def linear_schedule(self, initial_value: float) -> Callable[[float], float]:
+    def lr_schedule(self, initial_value: float, rate: float):
         """
-        Linear learning rate schedule.
+        Learning rate schedule:
+            Exponential decay by factors of 10
 
         :param initial_value: Initial learning rate.
+        :param rate: Exponential rate of decay. High values mean fast early drop in LR
         :return: schedule that computes
         current learning rate depending on remaining progress
         """
@@ -34,7 +37,10 @@ class ReinforcementLearner(BaseReinforcementLearningModel):
             :param progress_remaining:
             :return: current learning rate
             """
-            return progress_remaining * initial_value
+            if progress_remaining <= 0:
+                return 1e-9
+            
+            return initial_value * 10 ** (rate * log(progress_remaining))
 
         return func
 
@@ -44,13 +50,13 @@ class ReinforcementLearner(BaseReinforcementLearningModel):
         total_timesteps = self.freqai_info["rl_config"]["train_cycles"] * len(train_df)
 
         policy_kwargs = dict(activation_fn=th.nn.Tanh,
-                             net_arch=[512, 512, 256])
+                             net_arch=[dict(pi=[256, 256], vf=[256, 256])])
 
         if dk.pair not in self.dd.model_dictionary or not self.continual_learning:
             model = self.MODELCLASS(self.policy_type, self.train_env, policy_kwargs=policy_kwargs,
                                     tensorboard_log=Path(dk.data_path / "tensorboard"),
-                                    learning_rate=self.linear_schedule(0.01),
-                                    clip_range=self.linear_schedule(0.5),
+                                    learning_rate=self.lr_schedule(initial_value = 0.01, rate = 3),
+                                    clip_range=self.lr_schedule(initial_value = 0.5, rate = 3),
                                     **self.freqai_info['model_training_parameters']
                                     )
         else:

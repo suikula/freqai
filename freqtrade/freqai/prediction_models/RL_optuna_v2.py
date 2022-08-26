@@ -6,8 +6,7 @@ import torch as th
 import numpy as np
 import optuna
 import gym
-from stable_baselines.common.schedules import LinearSchedule
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, CallbackList
 from stable_baselines3 import PPO
 import yaml
 from optuna.pruners import MedianPruner
@@ -45,21 +44,18 @@ class ReinforcementLearner_optuna(BaseReinforcementLearningModel):
         total_timesteps = self.freqai_info["rl_config"]["train_cycles"] * len(train_df)
 
 
-        th.set_num_threads(8)
+        th.set_num_threads(15)
         sampler = TPESampler(n_startup_trials=N_STARTUP_TRIALS)
         pruner = MedianPruner(n_startup_trials=N_STARTUP_TRIALS, n_warmup_steps=N_EVALUATIONS // 3)
-        
-        #func = lambda trial: self.objective(trial, train_df)
 
-        #study = optuna.create_study(direction="maximize")
         study = optuna.create_study(sampler=sampler, pruner=pruner, direction="maximize")
-        #study.optimize(func, n_trials=45, show_progress_bar=True, n_jobs=15)
 
-        #study = optuna.create_study(sampler=sampler, pruner=pruner, direction="maximize")
+        #func = lambda trial: self.objective(trial, data_dictionary)
 
         try:
             #study.optimize(func, n_trials=N_TRIALS, timeout=600, show_progress_bar=True, n_jobs=15)
-            study.optimize(self.objective, data_dictionary, dk, n_trials=N_TRIALS, timeout=600, show_progress_bar=True, n_jobs=15)
+            #study.optimize(self.objective, train_df, N_TRIALS, timeout=600, show_progress_bar=True, n_jobs=2)
+            study.optimize(self.objective, N_TRIALS)
         except KeyboardInterrupt:
             pass
         
@@ -79,42 +75,42 @@ class ReinforcementLearner_optuna(BaseReinforcementLearningModel):
         for key, value in trial.user_attrs.items():
             print("    {}: {}".format(key, value))
 
-        return 0
+        #return 0
 
 
 
-        # policy_kwargs = dict(activation_fn=th.nn.ReLU,
-        #                      net_arch=[512, 512, 256, 128])
+        policy_kwargs = dict(activation_fn=th.nn.ReLU,
+                             net_arch=[512, 512, 256, 128])
 
-        # model = self.MODELCLASS(self.policy_type, self.train_env, policy_kwargs=policy_kwargs,
-        #                         tensorboard_log=Path(dk.data_path / "tensorboard"),
-        #                         **self.freqai_info['model_training_parameters']
-        #                         )
+        model = self.MODELCLASS(self.policy_type, self.train_env,
+                                tensorboard_log=Path(dk.data_path / "tensorboard"),
+                                **trial.params)
+                                #**self.freqai_info['model_training_parameters']
+                                #)
 
-        # model.learn(
-        #     total_timesteps=int(total_timesteps),
-        #     callback=self.eval_callback
-        # )
+        model.learn(
+            total_timesteps=int(total_timesteps),
+            callback=self.eval_callback
+        )
 
-        # if Path(dk.data_path / "best_model.zip").is_file():
-        #     logger.info('Callback found a best model.')
-        #     best_model = self.MODELCLASS.load(dk.data_path / "best_model")
-        #     return best_model
+        if Path(dk.data_path / "best_model.zip").is_file():
+            logger.info('Callback found a best model.')
+            best_model = self.MODELCLASS.load(dk.data_path / "best_model")
+            return best_model
 
-        # logger.info('Couldnt find best model, using final model instead.')
+        logger.info('Couldnt find best model, using final model instead.')
 
-        # return model
+        return model
     
-    def objective(self, trial: optuna.Trial, data_dictionary: Dict[str, Any]) -> float:
+    def objective(self, trial: optuna.Trial) -> float:
 
         kwargs = {}
         algo = self.freqai_info["rl_config"]["model_type"]
-        train_df = data_dictionary["train_features"]
-        total_timesteps = self.freqai_info["rl_config"]["train_cycles"] * len(train_df)
+        #train_df = data_dictionary["train_features"]
+        total_timesteps = 5000
 
         sampled_hyperparams = HYPERPARAMS_SAMPLER[algo](trial)
         kwargs.update(sampled_hyperparams)
-
 
 
 
@@ -193,115 +189,109 @@ class MyRLEnv(Base5ActionRLEnv):
     """
     def calculate_reward(self, action):
 
-        #if self._last_trade_tick is None:
-        #    return 0.
         rw = 0
 
-        max_trade_duration = 20 # this should be set in config
+        # # first, penalize if the action is not valid
+        # if not self._is_valid(action):
+        #     return -15
+
+        max_trade_duration = self.rl_config.get('max_trade_duration_candles', 20)
+        min_profit = self.rl_config.get('min_profit', 0.005)
         pnl = self.get_unrealized_profit()
-
-        # # prevent unwanted actions during trades or when no trades are open
-        if action == Actions.Short_enter.value and self._position == Positions.Long:
-            return -1
-        if action == Actions.Short_exit.value and self._position == Positions.Long:
-            return -1
-        if action == Actions.Long_enter.value and self._position == Positions.Short:
-            return -1
-        if action == Actions.Long_exit.value and self._position == Positions.Short:
-            return -1
-
-        if action == Actions.Short_exit.value and self._position == Positions.Neutral:
-            return -1
-        if action == Actions.Long_exit.value and self._position == Positions.Neutral:
-            return -1
-
 
         # reward for opening trades
         if action == Actions.Short_enter.value and self._position == Positions.Neutral:
-            return 1
+            return 10
         if action == Actions.Long_enter.value and self._position == Positions.Neutral:
-            return 1
+            return 10
 
         # close long
         if action == Actions.Long_exit.value and self._position == Positions.Long:
-            if pnl >= 0 and pnl < 0.005:
+            if pnl >= 0 and pnl < min_profit:
                 self.long_winners += 1
+                self.long_small_profit += 1
                 return 0
-            if pnl >= 0.005: # this should be set in config
-                # aim x2 rw
+            if pnl >= min_profit:
                 if pnl > self.profit_aim * self.rr:
-                    rw = 5
+                    rw = 50
                 if pnl > self.profit_aim * (self.rr * 2):
-                    rw = 10
-                if pnl < self.profit_aim * self.rr:
-                    rw = 2
-                
+                    rw = 100
+
                 # duration rules
                 if self._current_tick - self._last_trade_tick <= max_trade_duration:
                     self.long_winners += 1
                     self.long_pnl += pnl
+                    self.long_profit += 1
                     return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
-                    for i in range(1,9):
+                    for i in range(1, 9):
                         if over == i:
                             self.long_winners += 1
                             self.long_pnl += pnl
-                            return rw*(1-(i/10))
+                            self.long_over_profit += 1
+                            return rw * (1 - (i / 10))
+
                         elif over >= 9:
                             self.long_winners += 1
                             self.long_pnl += pnl
+                            self.long_over_over_profit += 1
                             return rw * 0.1
 
-            #punishment for losses
+            # punishment for losses
             if pnl < 0:
                 self.long_losers += 1
                 self.long_pnl += pnl
-                return -7
+                self.long_loss += 1
+                return -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.long_pnl += pnl
                 self.long_losers += 1
-                return -12
-
+                self.long_big_loss += 1
+                return -100
 
         # close short
         if action == Actions.Short_exit.value and self._position == Positions.Short:
-            if pnl >= 0 and pnl < 0.005:
-                self.long_winners += 1
+            if pnl >= 0 and pnl < min_profit:
+                self.short_winners += 1
+                self.short_small_profit += 1
                 return 0
-            if pnl >= 0.005:
+            if pnl >= min_profit:
                 # aim x2 rw
                 if pnl > self.profit_aim * self.rr:
-                    rw = 5
+                    rw = 50
                 if pnl > self.profit_aim * (self.rr * 2):
-                    rw = 10
-                if pnl < self.profit_aim * self.rr:
-                    rw = 2
+                    rw = 100
 
                 # duration rules
                 if self._current_tick - self._last_trade_tick <= max_trade_duration:
                     self.short_winners += 1
                     self.short_pnl += pnl
+                    self.short_profit += 1
                     return rw
                 if self._current_tick - self._last_trade_tick > max_trade_duration:
                     over = (self._current_tick - self._last_trade_tick) - max_trade_duration
-                    for i in range(1,9):
+                    for i in range(1, 9):
                         if over == i:
                             self.short_winners += 1
                             self.short_pnl += pnl
-                            return rw*(1-(i/10))
+                            self.short_over_profit += 1
+                            return rw * (1 - (i / 10))
                         elif over >= 9:
                             self.short_winners += 1
                             self.short_pnl += pnl
+                            self.short_over_over_profit += 1
                             return rw * 0.1
-            
-            #punishment for losses
+
+            # punishment for losses
             if pnl < 0:
                 self.short_losers += 1
                 self.short_pnl += pnl
-                return -7
+                self.short_loss += 1
+                return -50
             if pnl < (self.profit_aim * -1) * self.rr:
                 self.short_losers += 1
                 self.short_pnl += pnl
-                return -12
+                self.short_big_loss += 1
+                return -100
         return 0
